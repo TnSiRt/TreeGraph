@@ -1,152 +1,281 @@
-const tree = document.getElementById("tree");
-const lines = document.getElementById("lines");
+/* =======================
+   GLOBAL VARIABLES
+======================= */
+
+const svg = document.getElementById("tree"); // глобально
+let g; // группа для zoom/pan
 
 let nodes = [];
 let families = [];
-let levels = {};
+let nodeId = 0;
 let selectedNode = null;
 
-// ====== МОДЕЛИ ======
+let offsetX = 500;
+let offsetY = 500;
+let scale = 1;
 
-function createNode(name, gender, level) {
-  const div = document.createElement("div");
-  div.className = "person " + (gender === "M" ? "male" : "female");
-  div.textContent = name;
-  tree.appendChild(div);
+let isPanning = false;
+let startX = 0;
+let startY = 0;
 
+/* =======================
+   NODE / FAMILY
+======================= */
+
+function createNode(gender, level) {
   const node = {
-    id: nodes.length,
-    name,
+    id: nodeId++,
     gender,
     level,
-    div,
-    familyAsChild: null,
-    familyAsParent: null,
     x: 0,
-    y: 0
+    y: 0,
+    parents: [],
+    children: [],
+    families: []
   };
-
   nodes.push(node);
-  if (!levels[level]) levels[level] = [];
-  levels[level].push(node);
-
-  div.oncontextmenu = e => {
-    e.preventDefault();
-    selectedNode = node;
-    showContextMenu(e.clientX, e.clientY);
-  };
-
-  layout();
   return node;
 }
 
-function createFamily(parent1, parent2) {
-  const family = {
-    parents: [parent1, parent2].filter(Boolean),
-    children: []
-  };
-  families.push(family);
-  return family;
+function createFamily(parents) {
+  const fam = { parents, children: [] };
+  families.push(fam);
+  parents.forEach(p => p.families.push(fam));
+  return fam;
 }
 
-// ====== ГЕОМЕТРИЯ ======
+/* =======================
+   ADD FUNCTIONS
+======================= */
+
+function addRoot(gender) {
+  if (nodes.length > 0) return alert("Корень уже есть");
+  createNode(gender, 0);
+  layout();
+}
+
+function addParent(node, gender) {
+  const parent = createNode(gender, node.level + 1);
+
+  let fam;
+  if (node.parents.length === 0) {
+    fam = createFamily([parent]);
+    fam.children.push(node);
+    node.parents.push(parent);
+    parent.children.push(node);
+  } else if (node.parents.length === 1) {
+    fam = node.parents[0].families[0];
+    fam.parents.push(parent);
+    parent.families.push(fam);
+    fam.children.forEach(c => c.parents.push(parent));
+  }
+
+  layout();
+}
+
+function addSibling(node, gender) {
+  if (node.parents.length === 0) return;
+
+  const fam = node.parents[0].families[0];
+  const sibling = createNode(gender, node.level);
+
+  sibling.parents = [...fam.parents];
+  fam.children.push(sibling);
+  fam.parents.forEach(p => p.children.push(sibling));
+
+  layout();
+}
+
+function addChild(node, gender) {
+  let fam;
+  if (node.families.length === 0) {
+    fam = createFamily([node]);
+  } else {
+    fam = node.families[0];
+  }
+
+  const child = createNode(gender, node.level - 1);
+  fam.children.push(child);
+  child.parents = [...fam.parents];
+  fam.parents.forEach(p => p.children.push(child));
+
+  layout();
+}
+
+/* =======================
+   LAYOUT FUNCTION
+======================= */
 
 function layout() {
-  lines.innerHTML = "";
+  const levels = {};
 
-  // 1. Сначала раскладываем уровни БЕЗ детей
-  Object.keys(levels).forEach(lvl => {
-    const arr = levels[lvl];
-    const gap = 140;
-    const total = (arr.length - 1) * gap;
-    const startX = window.innerWidth / 2 - total / 2;
+  nodes.forEach(n => {
+    if (!levels[n.level]) levels[n.level] = [];
+    levels[n.level].push(n);
+  });
 
-    arr.forEach((node, i) => {
-      node.x = startX + i * gap;
-      node.y = 600 - lvl * 160;
+  const levelGap = 180;
+  const nodeGap = 140;
+
+  Object.keys(levels).forEach(level => {
+    const arr = levels[level];
+    const width = (arr.length - 1) * nodeGap;
+    const startX = -width / 2;
+
+    arr.forEach((n, i) => {
+      n.x = startX + i * nodeGap;
+      n.y = -level * levelGap;
     });
   });
 
-  // 2. Теперь корректируем детей относительно семьи
-  families.forEach(fam => {
-    if (!fam.children.length) return;
+  // Центрируем детей относительно родителей
+  families.forEach(f => {
+    if (f.parents.length === 0 || f.children.length === 0) return;
 
-    // центр семьи = центр родителей
     const centerX =
-      fam.parents.reduce((s, p) => s + p.x, 0) / fam.parents.length;
+      f.parents.reduce((s, p) => s + p.x, 0) / f.parents.length;
 
     const gap = 120;
-    const count = fam.children.length;
-    const startX = centerX - ((count - 1) * gap) / 2;
+    const startX = centerX - ((f.children.length - 1) * gap) / 2;
 
-    fam.children.forEach((child, i) => {
-      child.x = startX + i * gap;
+    f.children.forEach((c, i) => {
+      c.x = startX + i * gap;
     });
   });
 
-  // 3. Применяем координаты к DOM
-  nodes.forEach(node => {
-    node.div.style.left = node.x - 30 + "px";
-    node.div.style.top  = node.y - 30 + "px";
-  });
-
-  drawLines();
+  draw();
 }
 
-// ====== ЛИНИИ ======
+/* =======================
+   DRAW FUNCTION
+======================= */
 
-function drawLines() {
-  const tRect = tree.getBoundingClientRect();
+function draw() {
+  g = document.createElementNS(svg.namespaceURI, "g");
+  g.setAttribute("transform", `translate(${offsetX},${offsetY}) scale(${scale})`);
+  svg.innerHTML = "";
+  svg.appendChild(g);
 
-  families.forEach(fam => {
-    if (!fam.parents.length || !fam.children.length) return;
+  	// DRAW LINES
+	families.forEach(f => {
+	 f.children.forEach(c => {
+	   f.parents.forEach(p => {
+	     // сначала вертикальная линия вниз от родителя
+	     const midY = (p.y + 25 + c.y - 25) / 2;
 
-    const parentRects = fam.parents.map(p => p.div.getBoundingClientRect());
+	     const vertLine = document.createElementNS(svg.namespaceURI, "line");
+	     vertLine.setAttribute("x1", p.x);
+	     vertLine.setAttribute("y1", p.y + 25);
+	     vertLine.setAttribute("x2", p.x);
+	     vertLine.setAttribute("y2", midY);
+	     vertLine.setAttribute("stroke", "#888");
+	     vertLine.setAttribute("stroke-width", "2");
+	     g.appendChild(vertLine);
 
-    const parentXs = parentRects.map(
-      r => r.left - tRect.left + r.width / 2
-    );
+	     // горизонтальная линия к ребенку
+	     const horLine = document.createElementNS(svg.namespaceURI, "line");
+	     horLine.setAttribute("x1", p.x);
+	     horLine.setAttribute("y1", midY);
+	     horLine.setAttribute("x2", c.x);
+	     horLine.setAttribute("y2", midY);
+	     horLine.setAttribute("stroke", "#888");
+	     horLine.setAttribute("stroke-width", "2");
+	     g.appendChild(horLine);
 
-    const parentBottomY = Math.max(
-      ...parentRects.map(r => r.bottom - tRect.top)
-    );
-
-    const jointY = parentBottomY + 20;
-    const centerX = parentXs.reduce((a, b) => a + b, 0) / parentXs.length;
-
-    // линия между родителями
-    if (parentXs.length === 2) {
-      line(parentXs[0], parentBottomY, parentXs[1], parentBottomY);
+	     // вертикальная линия вниз к ребенку
+	     const downLine = document.createElementNS(svg.namespaceURI, "line");
+	     downLine.setAttribute("x1", c.x);
+	     downLine.setAttribute("y1", midY);
+	     downLine.setAttribute("x2", c.x);
+	     downLine.setAttribute("y2", c.y - 25);
+	     downLine.setAttribute("stroke", "#888");
+	     downLine.setAttribute("stroke-width", "2");
+	     g.appendChild(downLine);
+	   });
+	 });
+	});
+  // DRAW NODES
+  nodes.forEach(n => {
+    if (n.gender === "M") {
+      const r = document.createElementNS(svg.namespaceURI, "rect");
+      r.setAttribute("x", n.x - 25);
+      r.setAttribute("y", n.y - 25);
+      r.setAttribute("width", 50);
+      r.setAttribute("height", 50);
+      r.setAttribute("fill", "#4aa3ff");
+      r.classList.add("node");
+      r.onclick = e => openMenu(e, n);
+      g.appendChild(r);
+    } else {
+      const c = document.createElementNS(svg.namespaceURI, "circle");
+      c.setAttribute("cx", n.x);
+      c.setAttribute("cy", n.y);
+      c.setAttribute("r", 25);
+      c.setAttribute("fill", "#ff77aa");
+      c.classList.add("node");
+      c.onclick = e => openMenu(e, n);
+      g.appendChild(c);
     }
-
-    // вертикаль вниз
-    line(centerX, parentBottomY, centerX, jointY);
-
-    // горизонталь к детям
-    const childXs = fam.children.map(c => c.x);
-    line(
-      Math.min(...childXs),
-      jointY,
-      Math.max(...childXs),
-      jointY
-    );
-
-    // вертикали к каждому ребёнку
-    fam.children.forEach(child => {
-      const r = child.div.getBoundingClientRect();
-      const cy = r.top - tRect.top;
-      line(child.x, jointY, child.x, cy);
-    });
   });
 }
 
-function line(x1, y1, x2, y2) {
-  const l = document.createElementNS("http://www.w3.org/2000/svg", "line");
-  l.setAttribute("x1", x1);
-  l.setAttribute("y1", y1);
-  l.setAttribute("x2", x2);
-  l.setAttribute("y2", y2);
-  l.setAttribute("stroke", "black");
-  lines.appendChild(l);
+/* =======================
+   MENU
+======================= */
+
+function openMenu(e, node) {
+  e.stopPropagation();
+  selectedNode = node;
+
+  const action = prompt(
+    "1 — добавить родителя\n2 — добавить брата/сестру\n3 — добавить ребёнка\n\nВведите номер:"
+  );
+
+  if (action === "1") {
+    const g = confirm("Мужчина? OK = Да, Cancel = Женщина");
+    addParent(node, g ? "M" : "F");
+  }
+  if (action === "2") {
+    const g = confirm("Мужчина? OK = Да, Cancel = Женщина");
+    addSibling(node, g ? "M" : "F");
+  }
+  if (action === "3") {
+    const g = confirm("Мужчина? OK = Да, Cancel = Женщина");
+    addChild(node, g ? "M" : "F");
+  }
 }
 
+/* =======================
+   ZOOM + PAN
+======================= */
+
+svg.addEventListener("mousedown", e => {
+  isPanning = true;
+  startX = e.clientX;
+  startY = e.clientY;
+});
+
+svg.addEventListener("mousemove", e => {
+  if (!isPanning) return;
+  const dx = e.clientX - startX;
+  const dy = e.clientY - startY;
+  offsetX += dx;
+  offsetY += dy;
+  startX = e.clientX;
+  startY = e.clientY;
+  g.setAttribute("transform", `translate(${offsetX},${offsetY}) scale(${scale})`);
+});
+
+svg.addEventListener("mouseup", e => {
+  isPanning = false;
+});
+svg.addEventListener("mouseleave", e => {
+  isPanning = false;
+});
+
+svg.addEventListener("wheel", e => {
+  e.preventDefault();
+  const delta = e.deltaY < 0 ? 1.1 : 0.9;
+  scale *= delta;
+  g.setAttribute("transform", `translate(${offsetX},${offsetY}) scale(${scale})`);
+});
